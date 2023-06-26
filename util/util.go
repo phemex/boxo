@@ -3,6 +3,7 @@
 package util
 
 import (
+	"crypto/subtle"
 	"errors"
 	"io"
 	"math/rand"
@@ -150,9 +151,11 @@ func IsValidHash(s string) bool {
 
 // XOR takes two byte slices, XORs them together, returns the resulting slice.
 func XOR(a, b []byte) []byte {
-	c := make([]byte, len(a))
-	for i := 0; i < len(a); i++ {
-		c[i] = a[i] ^ b[i]
+	if len(a) != len(b) {
+		panic("unmatched slices lengths")
 	}
+
+	c := make([]byte, len(a))
+	subtle.XORBytes(c, a, b)
 	return c
 }
