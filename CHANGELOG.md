@@ -17,6 +17,8 @@ The following emojis are used to highlight certain changes:
 ### Added
 
 * ✨ The `routing/http` implements Delegated Peer Routing introduced in [IPIP-417](https://github.com/ipfs/specs/pull/417).
+* The gateway now sets a `Cache-Control` header for requests under the `/ipns/` namespace
+  if the TTL for the corresponding IPNS Records or DNSLink entities is known.
 
 ### Changed
 
@@ -33,7 +35,19 @@ The following emojis are used to highlight certain changes:
   for more details on how to use the new package.
 * 🛠 The signature of `CoreAPI.ResolvePath` in  `coreiface` has changed to now return
   the remainder segments as a second return value, matching the signature of `resolver.ResolveToLastNode`.
-
+* 🛠 The `namesys` package has been refactored. The following are the largest modifications:
+  * The options in `coreiface/options/namesys` have been moved to `namesys` and their names
+    have been made more consistent.
+  * Many of the exported structs and functions have been renamed in order to be consistent with
+    the remaining packages.
+  * `namesys.Resolver.Resolve` now returns a TTL, in addition to the resolved path. If the
+    TTL is unknown, 0 is returned. `IPNSResolver` is able to resolve a TTL, while `DNSResolver`
+    is not.
+  * `namesys/resolver.ResolveIPNS` has been moved to `namesys.ResolveIPNS` and now returns a TTL
+    in addition to the resolved path.
+* 🛠 The `gateway`'s `IPFSBackend.ResolveMutable` is now expected to return a TTL in addition to
+    the resolved path. If the TTL is unknown, 0 should be returned.
+ 
 ### Removed
 
 * 🛠 The `routing/http` package experienced following removals:
@@ -41,6 +55,8 @@ The following emojis are used to highlight certain changes:
     `ProvideBitswap` is still usable, but marked as deprecated. A protocol-agnostic 
     provide mechanism is being worked on in [IPIP-378](https://github.com/ipfs/specs/pull/378).
   * Server no longer exports `FindProvidersPath` and `ProvidePath`.
+* 🛠 The `coreiface/options/namesys` package has been removed.
+* 🛠 The `namesys.StartSpan` function is no longer exported.
 
 ### Fixed
 

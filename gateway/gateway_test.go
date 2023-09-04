@@ -37,11 +37,11 @@ func TestGatewayGet(t *testing.T) {
 		return p
 	}
 
-	backend.namesys["/ipns/example.com"] = path.NewIPFSPath(k.Cid())
-	backend.namesys["/ipns/working.example.com"] = k
-	backend.namesys["/ipns/double.example.com"] = mustMakeDNSLinkPath("working.example.com")
-	backend.namesys["/ipns/triple.example.com"] = mustMakeDNSLinkPath("double.example.com")
-	backend.namesys["/ipns/broken.example.com"] = mustMakeDNSLinkPath(k.Cid().String())
+	backend.namesys["/ipns/example.com"] = newMockNamesysItem(path.NewIPFSPath(k.Cid()), 0)
+	backend.namesys["/ipns/working.example.com"] = newMockNamesysItem(k, 0)
+	backend.namesys["/ipns/double.example.com"] = newMockNamesysItem(mustMakeDNSLinkPath("working.example.com"), 0)
+	backend.namesys["/ipns/triple.example.com"] = newMockNamesysItem(mustMakeDNSLinkPath("double.example.com"), 0)
+	backend.namesys["/ipns/broken.example.com"] = newMockNamesysItem(mustMakeDNSLinkPath(k.Cid().String()), 0)
 	// We picked .man because:
 	// 1. It's a valid TLD.
 	// 2. Go treats it as the file extension for "man" files (even though
@@ -49,7 +49,7 @@ func TestGatewayGet(t *testing.T) {
 	//
 	// Unfortunately, this may not work on all platforms as file type
 	// detection is platform dependent.
-	backend.namesys["/ipns/example.man"] = k
+	backend.namesys["/ipns/example.man"] = newMockNamesysItem(k, 0)
 
 	for _, test := range []struct {
 		host   string
@@ -98,7 +98,7 @@ func TestPretty404(t *testing.T) {
 	t.Logf("test server url: %s", ts.URL)
 
 	host := "example.net"
-	backend.namesys["/ipns/"+host] = path.NewIPFSPath(root)
+	backend.namesys["/ipns/"+host] = newMockNamesysItem(path.NewIPFSPath(root), 0)
 
 	for _, test := range []struct {
 		path   string
@@ -158,7 +158,56 @@ func TestHeaders(t *testing.T) {
 		dagCborRoots = dirRoots + "," + dagCborCID
 	)
 
-	t.Run("Cache-Control is not immutable on generated /ipfs/  HTML dir listings", func(t *testing.T) {
+	t.Run("Cache-Control uses TTL for /ipns/ when it is known", func(t *testing.T) {
+		t.Parallel()
+
+		ts, backend, root := newTestServerAndNode(t, nil, "ipns-hostname-redirects.car")
+		backend.namesys["/ipns/example.net"] = newMockNamesysItem(path.NewIPFSPath(root), time.Second*30)
+
+		t.Run("UnixFS generated directory listing without index.html has no Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Empty(t, res.Header["Cache-Control"])
+		})
+
+		t.Run("UnixFS directory with index.html has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/foo/", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+
+		t.Run("UnixFS file has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/foo/index.html", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+
+		t.Run("Raw block has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=raw", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+
+		t.Run("DAG-JSON block has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=dag-json", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+
+		t.Run("DAG-CBOR block has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=dag-cbor", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+
+		t.Run("CAR block has Cache-Control", func(t *testing.T) {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=car", nil)
+			res := mustDoWithoutRedirect(t, req)
+			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
+		})
+	})
+
+	t.Run("Cache-Control is not immutable on generated /ipfs/ HTML dir listings", func(t *testing.T) {
 		req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipfs/"+rootCID+"/", nil)
 		res := mustDoWithoutRedirect(t, req)
 
@@ -500,7 +549,7 @@ func TestRedirects(t *testing.T) {
 		t.Parallel()
 
 		ts, backend, root := newTestServerAndNode(t, nil, "ipns-hostname-redirects.car")
-		backend.namesys["/ipns/example.net"] = path.NewIPFSPath(root)
+		backend.namesys["/ipns/example.net"] = newMockNamesysItem(path.NewIPFSPath(root), 0)
 
 		// make request to directory containing index.html
 		req := mustNewRequest(t, http.MethodGet, ts.URL+"/foo", nil)
@@ -535,7 +584,7 @@ func TestRedirects(t *testing.T) {
 		t.Parallel()
 
 		backend, root := newMockBackend(t, "redirects-spa.car")
-		backend.namesys["/ipns/example.com"] = path.NewIPFSPath(root)
+		backend.namesys["/ipns/example.com"] = newMockNamesysItem(path.NewIPFSPath(root), 0)
 
 		ts := newTestServerWithConfig(t, backend, Config{
 			Headers:   map[string][]string{},
@@ -672,8 +721,8 @@ func TestDeserializedResponses(t *testing.T) {
 		t.Parallel()
 
 		backend, root := newMockBackend(t, "fixtures.car")
-		backend.namesys["/ipns/trustless.com"] = path.NewIPFSPath(root)
-		backend.namesys["/ipns/trusted.com"] = path.NewIPFSPath(root)
+		backend.namesys["/ipns/trustless.com"] = newMockNamesysItem(path.NewIPFSPath(root), 0)
+		backend.namesys["/ipns/trusted.com"] = newMockNamesysItem(path.NewIPFSPath(root), 0)
 
 		ts := newTestServerWithConfig(t, backend, Config{
 			Headers:   map[string][]string{},
@@ -735,8 +784,8 @@ func (mb *errorMockBackend) GetCAR(ctx context.Context, path path.ImmutablePath,
 	return ContentPathMetadata{}, nil, mb.err
 }
 
-func (mb *errorMockBackend) ResolveMutable(ctx context.Context, p path.Path) (path.ImmutablePath, error) {
-	return nil, mb.err
+func (mb *errorMockBackend) ResolveMutable(ctx context.Context, path path.Path) (path.ImmutablePath, time.Duration, error) {
+	return nil, 0, mb.err
 }
 
 func (mb *errorMockBackend) GetIPNSRecord(ctx context.Context, c cid.Cid) ([]byte, error) {
@@ -819,7 +868,7 @@ func (mb *panicMockBackend) GetCAR(ctx context.Context, immutablePath path.Immut
 	panic("i am panicking")
 }
 
-func (mb *panicMockBackend) ResolveMutable(ctx context.Context, p path.Path) (path.ImmutablePath, error) {
+func (mb *panicMockBackend) ResolveMutable(ctx context.Context, p path.Path) (path.ImmutablePath, time.Duration, error) {
 	panic("i am panicking")
 }
 

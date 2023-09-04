@@ -20,9 +20,8 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	opts "github.com/ipfs/boxo/coreiface/options/namesys"
+	"github.com/ipfs/boxo/ipns"
 	"github.com/ipfs/boxo/path"
-	"github.com/ipfs/go-cid"
 	ds "github.com/ipfs/go-datastore"
 	dssync "github.com/ipfs/go-datastore/sync"
 	ci "github.com/libp2p/go-libp2p/core/crypto"
@@ -34,33 +33,35 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// mpns (a multi-protocol NameSystem) implements generic IPFS naming.
+// namesys is a multi-protocol [NameSystem] that implements generic IPFS naming.
+// It uses several [Resolver]s:
 //
-// Uses several Resolvers:
-// (a) IPFS routing naming: SFS-like PKI names.
-// (b) dns domains: resolves using links in DNS TXT records
+//  1. IPFS routing naming: SFS-like PKI names.
+//  2. dns domains: resolves using links in DNS TXT records
 //
-// It can only publish to: (a) IPFS routing naming.
-type mpns struct {
+// It can only publish to: 1. IPFS routing naming.
+type namesys struct {
 	ds ds.Datastore
 
 	dnsResolver, ipnsResolver resolver
 	ipnsPublisher             Publisher
 
-	staticMap map[string]path.Path
-	cache     *lru.Cache[string, any]
+	staticMap map[string]*cacheEntry
+	cache     *lru.Cache[string, cacheEntry]
 }
 
-type Option func(*mpns) error
+var _ NameSystem = &namesys{}
+
+type Option func(*namesys) error
 
 // WithCache is an option that instructs the name system to use a (LRU) cache of the given size.
 func WithCache(size int) Option {
-	return func(ns *mpns) error {
+	return func(ns *namesys) error {
 		if size <= 0 {
 			return fmt.Errorf("invalid cache size %d; must be > 0", size)
 		}
 
-		cache, err := lru.New[string, any](size)
+		cache, err := lru.New[string, cacheEntry](size)
 		if err != nil {
 			return err
 		}
@@ -70,33 +71,34 @@ func WithCache(size int) Option {
 	}
 }
 
-// WithDNSResolver is an option that supplies a custom DNS resolver to use instead of the system
-// default.
+// WithDNSResolver is an option that supplies a custom DNS resolver to use instead
+// of the system default.
 func WithDNSResolver(rslv madns.BasicResolver) Option {
-	return func(ns *mpns) error {
+	return func(ns *namesys) error {
 		ns.dnsResolver = NewDNSResolver(rslv.LookupTXT)
 		return nil
 	}
 }
 
-// WithDatastore is an option that supplies a datastore to use instead of an in-memory map datastore. The datastore is used to store published IPNS records and make them available for querying.
+// WithDatastore is an option that supplies a datastore to use instead of an in-memory map datastore.
+// The datastore is used to store published IPNS Records and make them available for querying.
 func WithDatastore(ds ds.Datastore) Option {
-	return func(ns *mpns) error {
+	return func(ns *namesys) error {
 		ns.ds = ds
 		return nil
 	}
 }
 
-// NewNameSystem will construct the IPFS naming system based on Routing
+// NewNameSystem constructs an IPFS [NameSystem] based on the given [routing.ValueStore].
 func NewNameSystem(r routing.ValueStore, opts ...Option) (NameSystem, error) {
-	var staticMap map[string]path.Path
+	var staticMap map[string]*cacheEntry
 
 	// Prewarm namesys cache with static records for deterministic tests and debugging.
 	// Useful for testing things like DNSLink without real DNS lookup.
 	// Example:
 	// IPFS_NS_MAP="dnslink-test.example.com:/ipfs/bafkreicysg23kiwv34eg2d7qweipxwosdo2py4ldv42nbauguluen5v6am"
 	if list := os.Getenv("IPFS_NS_MAP"); list != "" {
-		staticMap = make(map[string]path.Path)
+		staticMap = make(map[string]*cacheEntry)
 		for _, pair := range strings.Split(list, ",") {
 			mapping := strings.SplitN(pair, ":", 2)
 			key := mapping[0]
@@ -104,11 +106,11 @@ func NewNameSystem(r routing.ValueStore, opts ...Option) (NameSystem, error) {
 			if err != nil {
 				return nil, err
 			}
-			staticMap[key] = value
+			staticMap[key] = &cacheEntry{val: value, ttl: 0}
 		}
 	}
 
-	ns := &mpns{
+	ns := &namesys{
 		staticMap: staticMap,
 	}
 
@@ -127,149 +129,115 @@ func NewNameSystem(r routing.ValueStore, opts ...Option) (NameSystem, error) {
 		ns.dnsResolver = NewDNSResolver(madns.DefaultResolver.LookupTXT)
 	}
 
-	ns.ipnsResolver = NewIpnsResolver(r)
-	ns.ipnsPublisher = NewIpnsPublisher(r, ns.ds)
+	ns.ipnsResolver = NewIPNSResolver(r)
+	ns.ipnsPublisher = NewIPNSPublisher(r, ns.ds)
 
 	return ns, nil
 }
 
-// DefaultResolverCacheTTL defines max ttl of a record placed in namesys cache.
-const DefaultResolverCacheTTL = time.Minute
-
 // Resolve implements Resolver.
-func (ns *mpns) Resolve(ctx context.Context, name string, options ...opts.ResolveOpt) (path.Path, error) {
-	ctx, span := StartSpan(ctx, "MPNS.Resolve", trace.WithAttributes(attribute.String("Name", name)))
+func (ns *namesys) Resolve(ctx context.Context, name string, options ...ResolveOption) (path.Path, time.Duration, error) {
+	ctx, span := startSpan(ctx, "MPNS.Resolve", trace.WithAttributes(attribute.String("Name", name)))
 	defer span.End()
 
-	if strings.HasPrefix(name, "/ipfs/") {
-		return path.NewPath(name)
-	}
-
-	if !strings.HasPrefix(name, "/") {
-		return path.NewPath("/ipfs/" + name)
-	}
-
-	return resolve(ctx, ns, name, opts.ProcessOpts(options))
+	return resolve(ctx, ns, name, ProcessResolveOptions(options))
 }
 
-func (ns *mpns) ResolveAsync(ctx context.Context, name string, options ...opts.ResolveOpt) <-chan Result {
-	ctx, span := StartSpan(ctx, "MPNS.ResolveAsync", trace.WithAttributes(attribute.String("Name", name)))
+func (ns *namesys) ResolveAsync(ctx context.Context, name string, options ...ResolveOption) <-chan ResolveResult {
+	ctx, span := startSpan(ctx, "MPNS.ResolveAsync", trace.WithAttributes(attribute.String("Name", name)))
 	defer span.End()
 
-	if strings.HasPrefix(name, "/ipfs/") {
-		p, err := path.NewPath(name)
-		res := make(chan Result, 1)
-		res <- Result{p, err}
-		close(res)
-		return res
-	}
-
-	if !strings.HasPrefix(name, "/") {
-		p, err := path.NewPath("/ipfs/" + name)
-		res := make(chan Result, 1)
-		res <- Result{p, err}
-		close(res)
-		return res
-	}
-
-	return resolveAsync(ctx, ns, name, opts.ProcessOpts(options))
+	return resolveAsync(ctx, ns, name, ProcessResolveOptions(options))
 }
 
 // resolveOnce implements resolver.
-func (ns *mpns) resolveOnceAsync(ctx context.Context, name string, options opts.ResolveOpts) <-chan onceResult {
-	ctx, span := StartSpan(ctx, "MPNS.ResolveOnceAsync")
+func (ns *namesys) resolveOnceAsync(ctx context.Context, name string, options ResolveOptions) <-chan ResolveResult {
+	ctx, span := startSpan(ctx, "MPNS.ResolveOnceAsync")
 	defer span.End()
 
-	out := make(chan onceResult, 1)
+	out := make(chan ResolveResult, 1)
 
-	if !strings.HasPrefix(name, ipnsPrefix) {
-		name = ipnsPrefix + name
-	}
-	segments := strings.SplitN(name, "/", 4)
-	if len(segments) < 3 || segments[0] != "" {
-		log.Debugf("invalid name syntax for %s", name)
-		out <- onceResult{err: ErrResolveFailed}
+	p, err := path.NewPath(name)
+	if err != nil {
+		if p, err = path.NewPath("/ipfs/" + name); err == nil {
+			out <- ResolveResult{Path: p}
+		} else {
+			log.Debugf("invalid name syntax for %q", name)
+			out <- ResolveResult{Err: ErrResolveFailed}
+		}
+
+		close(out)
+		return out
+	} else if !p.Namespace().Mutable() {
+		out <- ResolveResult{Path: p, Err: err}
 		close(out)
 		return out
 	}
 
-	key := segments[2]
-
-	// Resolver selection:
-	// 1. if it is a PeerID/CID/multihash resolve through "ipns".
-	// 2. if it is a domain name, resolve through "dns"
-
-	var res resolver
-	ipnsKey, err := peer.Decode(key)
-	// CIDs in IPNS are expected to have libp2p-key multicodec
-	// We ease the transition by returning a more meaningful error with a valid CID
-	if err != nil {
-		ipnsCid, cidErr := cid.Decode(key)
-		if cidErr == nil && ipnsCid.Version() == 1 && ipnsCid.Type() != cid.Libp2pKey {
-			fixedCid := cid.NewCidV1(cid.Libp2pKey, ipnsCid.Hash()).String()
-			codecErr := fmt.Errorf("peer ID represented as CIDv1 require libp2p-key multicodec: retry with /ipns/%s", fixedCid)
-			log.Debugf("RoutingResolver: could not convert public key hash %q to peer ID: %s\n", key, codecErr)
-			out <- onceResult{err: codecErr}
-			close(out)
-			return out
-		}
-	}
+	segments := p.Segments()
+	key := segments[1]
+	ipnsName, err := ipns.NameFromString(key)
 
 	cacheKey := key
 	if err == nil {
-		cacheKey = string(ipnsKey)
+		cacheKey = ipnsName.String()
 	}
 
-	if p, ok := ns.cacheGet(cacheKey); ok {
+	if p, ttl, ok := ns.cacheGet(cacheKey); ok {
 		var err error
-		if len(segments) > 3 {
-			p, err = path.Join(p, segments[3])
+		if len(segments) > 2 {
+			p, err = path.Join(p, segments[2])
 		}
 		span.SetAttributes(attribute.Bool("CacheHit", true))
 		span.RecordError(err)
 
-		out <- onceResult{value: p, err: err}
+		out <- ResolveResult{Path: p, TTL: ttl, Err: err}
 		close(out)
 		return out
+	} else {
+		span.SetAttributes(attribute.Bool("CacheHit", false))
 	}
-	span.SetAttributes(attribute.Bool("CacheHit", false))
 
+	// Resolver selection:
+	// 	1. If it is an IPNS Name, resolve through IPNS.
+	// 	2. if it is a domain name, resolve through DNSLink.
+
+	var res resolver
 	if err == nil {
 		res = ns.ipnsResolver
 	} else if _, ok := dns.IsDomainName(key); ok {
 		res = ns.dnsResolver
 	} else {
-		out <- onceResult{err: fmt.Errorf("invalid IPNS root: %q", key)}
+		out <- ResolveResult{Err: fmt.Errorf("invalid IPNS root: %q", key)}
 		close(out)
 		return out
 	}
 
 	resCh := res.resolveOnceAsync(ctx, key, options)
-	var best onceResult
+	var best ResolveResult
 	go func() {
 		defer close(out)
 		for {
 			select {
 			case res, ok := <-resCh:
 				if !ok {
-					if best != (onceResult{}) {
-						ns.cacheSet(cacheKey, best.value, best.ttl)
+					if best != (ResolveResult{}) {
+						ns.cacheSet(cacheKey, best.Path, best.TTL)
 					}
 					return
 				}
-				if res.err == nil {
+
+				if res.Err == nil {
 					best = res
 				}
-				p := res.value
-				err := res.err
-				ttl := res.ttl
 
 				// Attach rest of the path
-				if len(segments) > 3 {
-					p, err = path.Join(p, segments[3])
+				p := res.Path
+				if p != nil && len(segments) > 2 {
+					p, err = path.Join(p, segments[2])
 				}
 
-				emitOnceResult(ctx, out, onceResult{value: p, ttl: ttl, err: err})
+				emitOnceResult(ctx, out, ResolveResult{Path: p, TTL: res.TTL, Err: res.Err})
 			case <-ctx.Done():
 				return
 			}
@@ -279,7 +247,7 @@ func (ns *mpns) resolveOnceAsync(ctx context.Context, name string, options opts.
 	return out
 }
 
-func emitOnceResult(ctx context.Context, outCh chan<- onceResult, r onceResult) {
+func emitOnceResult(ctx context.Context, outCh chan<- ResolveResult, r ResolveResult) {
 	select {
 	case outCh <- r:
 	case <-ctx.Done():
@@ -287,27 +255,31 @@ func emitOnceResult(ctx context.Context, outCh chan<- onceResult, r onceResult) 
 }
 
 // Publish implements Publisher
-func (ns *mpns) Publish(ctx context.Context, name ci.PrivKey, value path.Path, options ...opts.PublishOption) error {
-	ctx, span := StartSpan(ctx, "MPNS.Publish")
+func (ns *namesys) Publish(ctx context.Context, name ci.PrivKey, value path.Path, options ...PublishOption) error {
+	ctx, span := startSpan(ctx, "MPNS.Publish")
 	defer span.End()
 
 	// This is a bit hacky. We do this because the EOL is based on the current
 	// time, but also needed in the end of the function. Therefore, we parse
 	// the options immediately and add an option PublishWithEOL with the EOL
 	// calculated in this moment.
-	publishOpts := opts.ProcessPublishOptions(options)
-	options = append(options, opts.PublishWithEOL(publishOpts.EOL))
+	publishOpts := ProcessPublishOptions(options)
+	options = append(options, PublishWithEOL(publishOpts.EOL))
 
-	id, err := peer.IDFromPrivateKey(name)
+	pid, err := peer.IDFromPrivateKey(name)
 	if err != nil {
 		span.RecordError(err)
 		return err
 	}
-	span.SetAttributes(attribute.String("ID", id.String()))
+
+	ipnsName := ipns.NameFromPeer(pid)
+	cacheKey := ipnsName.String()
+
+	span.SetAttributes(attribute.String("ID", pid.String()))
 	if err := ns.ipnsPublisher.Publish(ctx, name, value, options...); err != nil {
 		// Invalidate the cache. Publishing may _partially_ succeed but
 		// still return an error.
-		ns.cacheInvalidate(string(id))
+		ns.cacheInvalidate(cacheKey)
 		span.RecordError(err)
 		return err
 	}
@@ -318,6 +290,6 @@ func (ns *mpns) Publish(ctx context.Context, name ci.PrivKey, value path.Path, o
 	if ttEOL := time.Until(publishOpts.EOL); ttEOL < ttl {
 		ttl = ttEOL
 	}
-	ns.cacheSet(string(id), value, ttl)
+	ns.cacheSet(cacheKey, value, ttl)
 	return nil
 }

@@ -2,12 +2,9 @@ package namesys
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"testing"
 	"time"
 
-	opts "github.com/ipfs/boxo/coreiface/options/namesys"
 	"github.com/ipfs/boxo/ipns"
 	"github.com/ipfs/boxo/path"
 	offroute "github.com/ipfs/boxo/routing/offline"
@@ -16,33 +13,30 @@ import (
 	record "github.com/libp2p/go-libp2p-record"
 	ci "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockResolver struct {
 	entries map[string]string
 }
 
-func testResolution(t *testing.T, resolver Resolver, name string, depth uint, expected string, expError error) {
+func testResolution(t *testing.T, resolver Resolver, name string, depth uint, expected string, expectedTTL time.Duration, expectedError error) {
 	t.Helper()
-	p, err := resolver.Resolve(context.Background(), name, opts.Depth(depth))
-	if !errors.Is(err, expError) {
-		t.Fatal(fmt.Errorf(
-			"expected %s with a depth of %d to have a '%s' error, but got '%s'",
-			name, depth, expError, err))
-	}
+
+	p, ttl, err := resolver.Resolve(context.Background(), name, ResolveWithDepth(depth))
+	require.ErrorIs(t, err, expectedError)
+	require.Equal(t, expectedTTL, ttl)
 	if expected == "" {
-		assert.Nil(t, p, "%s with depth %d", name, depth)
+		require.Nil(t, p, "%s with depth %d", name, depth)
 	} else {
-		assert.Equal(t, p.String(), expected, "%s with depth %d", name, depth)
+		require.Equal(t, expected, p.String(), "%s with depth %d", name, depth)
 	}
 }
 
-func (r *mockResolver) resolveOnceAsync(ctx context.Context, name string, options opts.ResolveOpts) <-chan onceResult {
+func (r *mockResolver) resolveOnceAsync(ctx context.Context, name string, options ResolveOptions) <-chan ResolveResult {
 	p, err := path.NewPath(r.entries[name])
-	out := make(chan onceResult, 1)
-	out <- onceResult{value: p, err: err}
+	out := make(chan ResolveResult, 1)
+	out <- ResolveResult{Path: p, Err: err}
 	close(out)
 	return out
 }
@@ -69,117 +63,88 @@ func mockResolverTwo() *mockResolver {
 }
 
 func TestNamesysResolution(t *testing.T) {
-	r := &mpns{
+	r := &namesys{
 		ipnsResolver: mockResolverOne(),
 		dnsResolver:  mockResolverTwo(),
 	}
 
-	testResolution(t, r, "Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", opts.DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", nil)
-	testResolution(t, r, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", opts.DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", nil)
-	testResolution(t, r, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", opts.DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", nil)
-	testResolution(t, r, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 1, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/ipfs.io", opts.DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", nil)
-	testResolution(t, r, "/ipns/ipfs.io", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/ipfs.io", 2, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", opts.DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", nil)
-	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 1, "/ipns/ipfs.io", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 2, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 3, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/12D3KooWFB51PRY9BxcXSH6khFXw1BZeszeLDy7C8GciskqCTZn5", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", ErrResolveRecursion)
-	testResolution(t, r, "/ipns/bafzbeickencdqw37dpz3ha36ewrh4undfjt2do52chtcky4rxkj447qhdm", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", ErrResolveRecursion)
+	testResolution(t, r, "Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", 0, nil)
+	testResolution(t, r, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", 0, nil)
+	testResolution(t, r, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", 0, nil)
+	testResolution(t, r, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 1, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/ipfs.io", DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", 0, nil)
+	testResolution(t, r, "/ipns/ipfs.io", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/ipfs.io", 2, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", DefaultDepthLimit, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj", 0, nil)
+	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 1, "/ipns/ipfs.io", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 2, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/QmY3hE8xgFCjGcz6PHgnvJz5HZi1BaKRfPkn1ghZUcYMjD", 3, "/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/12D3KooWFB51PRY9BxcXSH6khFXw1BZeszeLDy7C8GciskqCTZn5", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 0, ErrResolveRecursion)
+	testResolution(t, r, "/ipns/bafzbeickencdqw37dpz3ha36ewrh4undfjt2do52chtcky4rxkj447qhdm", 1, "/ipns/QmbCMUZw6JFeZ7Wp9jkzbye3Fzp2GGcPgC3nmeUjfVF87n", 0, ErrResolveRecursion)
+}
+
+func TestResolveIPNS(t *testing.T) {
+	ns := &namesys{
+		ipnsResolver: mockResolverOne(),
+		dnsResolver:  mockResolverTwo(),
+	}
+
+	inputPath, err := path.NewPath("/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy/a/b/c")
+	require.NoError(t, err)
+
+	res, _, err := ResolveIPNS(context.Background(), ns, inputPath)
+	require.NoError(t, err)
+	require.Equal(t, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj/a/b/c", res.String())
 }
 
 func TestPublishWithCache0(t *testing.T) {
 	dst := dssync.MutexWrap(ds.NewMapDatastore())
-	priv, _, err := ci.GenerateKeyPair(ci.RSA, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ps, err := pstoremem.NewPeerstore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := peer.IDFromPrivateKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = ps.AddPrivKey(pid, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv, _, err := ci.GenerateKeyPair(ci.RSA, 4096)
+	require.NoError(t, err)
 
 	routing := offroute.NewOfflineRouter(dst, record.NamespacedValidator{
-		"ipns": ipns.Validator{KeyBook: ps},
+		"ipns": ipns.Validator{}, // No need for KeyBook, as records created by NameSys include PublicKey for RSA.
 		"pk":   record.PublicKeyValidator{},
 	})
 
 	nsys, err := NewNameSystem(routing, WithDatastore(dst))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// CID is arbitrary.
 	p, err := path.NewPath("/ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	err = nsys.Publish(context.Background(), priv, p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 }
 
 func TestPublishWithTTL(t *testing.T) {
 	dst := dssync.MutexWrap(ds.NewMapDatastore())
 	priv, _, err := ci.GenerateKeyPair(ci.RSA, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ps, err := pstoremem.NewPeerstore()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	pid, err := peer.IDFromPrivateKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = ps.AddPrivKey(pid, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	routing := offroute.NewOfflineRouter(dst, record.NamespacedValidator{
-		"ipns": ipns.Validator{KeyBook: ps},
+		"ipns": ipns.Validator{}, // No need for KeyBook, as records created by NameSys include PublicKey for RSA.
 		"pk":   record.PublicKeyValidator{},
 	})
 
-	nsys, err := NewNameSystem(routing, WithDatastore(dst), WithCache(128))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ns, err := NewNameSystem(routing, WithDatastore(dst), WithCache(128))
+	require.NoError(t, err)
 
 	// CID is arbitrary.
 	p, err := path.NewPath("/ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	ttl := 1 * time.Second
 	eol := time.Now().Add(2 * time.Second)
 
-	err = nsys.Publish(context.Background(), priv, p, opts.PublishWithEOL(eol), opts.PublishWithTTL(ttl))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ientry, ok := nsys.(*mpns).cache.Get(string(pid))
-	if !ok {
-		t.Fatal("cache get failed")
-	}
-	entry, ok := ientry.(cacheEntry)
-	if !ok {
-		t.Fatal("bad cache item returned")
-	}
-	if entry.eol.Sub(eol) > 10*time.Millisecond {
-		t.Fatalf("bad cache ttl: expected %s, got %s", eol, entry.eol)
-	}
+	err = ns.Publish(context.Background(), priv, p, PublishWithEOL(eol), PublishWithTTL(ttl))
+	require.NoError(t, err)
+
+	entry, ok := ns.(*namesys).cache.Get(ipns.NameFromPeer(pid).String())
+	require.True(t, ok)
+	require.LessOrEqual(t, entry.eol.Sub(eol), 10*time.Millisecond)
 }
