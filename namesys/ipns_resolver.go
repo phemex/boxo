@@ -13,7 +13,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// IPNSResolver implements [Resolver] for IPNS Records.
+// IPNSResolver implements [Resolver] for IPNS Records. This resolver always returns
+// a TTL if the record is still valid. It happens as follows:
+//
+//  1. Provisory TTL is chosen: record TTL if it exists, otherwise [DefaultIPNSRecordTTL].
+//  2. If provisory TTL expires before EOL, then returned TTL is duration between EOL and now.
+//  3. If record is expired, 0 is returned as TTL.
 type IPNSResolver struct {
 	routing routing.ValueStore
 }
@@ -102,24 +107,8 @@ func (r *IPNSResolver) resolveOnceAsync(ctx context.Context, nameStr string, opt
 					return
 				}
 
-				ttl := DefaultResolverCacheTTL
-				if recordTTL, err := rec.TTL(); err == nil {
-					ttl = recordTTL
-				}
-
-				switch eol, err := rec.Validity(); err {
-				case ipns.ErrUnrecognizedValidity:
-					// No EOL.
-				case nil:
-					ttEol := time.Until(eol)
-					if ttEol < 0 {
-						// It *was* valid when we first resolved it.
-						ttl = 0
-					} else if ttEol < ttl {
-						ttl = ttEol
-					}
-				default:
-					log.Errorf("encountered error when parsing EOL: %s", err)
+				ttl, err := calculateBestTTL(rec)
+				if err != nil {
 					emitOnceResult(ctx, out, ResolveResult{Err: err})
 					return
 				}
@@ -165,4 +154,28 @@ func ResolveIPNS(ctx context.Context, ns NameSystem, p path.Path) (path.Path, ti
 	}
 
 	return p, ttl, nil
+}
+
+func calculateBestTTL(rec *ipns.Record) (time.Duration, error) {
+	ttl := DefaultResolverCacheTTL
+	if recordTTL, err := rec.TTL(); err == nil {
+		ttl = recordTTL
+	}
+
+	switch eol, err := rec.Validity(); err {
+	case ipns.ErrUnrecognizedValidity:
+		// No EOL.
+	case nil:
+		ttEol := time.Until(eol)
+		if ttEol < 0 {
+			// It *was* valid when we first resolved it.
+			ttl = 0
+		} else if ttEol < ttl {
+			ttl = ttEol
+		}
+	default:
+		return 0, err
+	}
+
+	return ttl, nil
 }

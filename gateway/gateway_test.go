@@ -163,48 +163,33 @@ func TestHeaders(t *testing.T) {
 
 		ts, backend, root := newTestServerAndNode(t, nil, "ipns-hostname-redirects.car")
 		backend.namesys["/ipns/example.net"] = newMockNamesysItem(path.NewIPFSPath(root), time.Second*30)
+		backend.namesys["/ipns/example.com"] = newMockNamesysItem(path.NewIPFSPath(root), time.Second*55)
+		backend.namesys["/ipns/unknown.com"] = newMockNamesysItem(path.NewIPFSPath(root), 0)
 
-		t.Run("UnixFS generated directory listing without index.html has no Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Empty(t, res.Header["Cache-Control"])
-		})
+		testCases := []struct {
+			path         string
+			cacheControl string
+		}{
+			{"/ipns/example.net/", "public, max-age=30"},                 // As generated directory listing
+			{"/ipns/example.com/", "public, max-age=55"},                 // As generated directory listing (different)
+			{"/ipns/unknown.com/", ""},                                   // As generated directory listing (unknown)
+			{"/ipns/example.net/foo/", "public, max-age=30"},             // As index.html directory listing
+			{"/ipns/example.net/foo/index.html", "public, max-age=30"},   // As deserialized UnixFS file
+			{"/ipns/example.net/?format=raw", "public, max-age=30"},      // As Raw block
+			{"/ipns/example.net/?format=dag-json", "public, max-age=30"}, // As DAG-JSON block
+			{"/ipns/example.net/?format=dag-cbor", "public, max-age=30"}, // As DAG-CBOR block
+			{"/ipns/example.net/?format=car", "public, max-age=30"},      // As CAR block
+		}
 
-		t.Run("UnixFS directory with index.html has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/foo/", nil)
+		for _, testCase := range testCases {
+			req := mustNewRequest(t, http.MethodGet, ts.URL+testCase.path, nil)
 			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
-
-		t.Run("UnixFS file has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net/foo/index.html", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
-
-		t.Run("Raw block has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=raw", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
-
-		t.Run("DAG-JSON block has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=dag-json", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
-
-		t.Run("DAG-CBOR block has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=dag-cbor", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
-
-		t.Run("CAR block has Cache-Control", func(t *testing.T) {
-			req := mustNewRequest(t, http.MethodGet, ts.URL+"/ipns/example.net?format=car", nil)
-			res := mustDoWithoutRedirect(t, req)
-			require.Equal(t, "public, max-age=30", res.Header.Get("Cache-Control"))
-		})
+			if testCase.cacheControl == "" {
+				assert.Empty(t, res.Header["Cache-Control"])
+			} else {
+				assert.Equal(t, testCase.cacheControl, res.Header.Get("Cache-Control"))
+			}
+		}
 	})
 
 	t.Run("Cache-Control is not immutable on generated /ipfs/ HTML dir listings", func(t *testing.T) {

@@ -283,6 +283,7 @@ func (ns *namesys) Publish(ctx context.Context, name ci.PrivKey, value path.Path
 		span.RecordError(err)
 		return err
 	}
+
 	ttl := DefaultResolverCacheTTL
 	if publishOpts.TTL >= 0 {
 		ttl = publishOpts.TTL

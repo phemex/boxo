@@ -126,6 +126,11 @@ func (i *handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 	dirEtag := getDirListingEtag(resolvedPath.Cid())
 	w.Header().Set("Etag", dirEtag)
 
+	// Add TTL if known.
+	if ttl > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(ttl.Seconds())))
+	}
+
 	if r.Method == http.MethodHead {
 		logger.Debug("return as request's HTTP method is HEAD")
 		return true
