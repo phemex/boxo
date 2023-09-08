@@ -155,9 +155,8 @@ func ProcessResolveOptions(opts []ResolveOption) ResolveOptions {
 
 // Publisher is an object capable of publishing particular names.
 type Publisher interface {
-	// Publish establishes a name-value mapping.
-	// TODO make this not PrivKey specific.
-	Publish(ctx context.Context, name ci.PrivKey, value path.Path, options ...PublishOption) error
+	// Publish publishes the given value under the name represented by the given private key.
+	Publish(ctx context.Context, sk ci.PrivKey, value path.Path, options ...PublishOption) error
 }
 
 // PublishOptions specifies options for publishing an IPNS Record.
