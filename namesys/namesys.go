@@ -186,7 +186,7 @@ func (ns *namesys) resolveOnceAsync(ctx context.Context, name string, options Re
 	if p, ttl, ok := ns.cacheGet(cacheKey); ok {
 		var err error
 		if len(segments) > 2 {
-			p, err = path.Join(p, segments[2])
+			p, err = path.Join(p, segments[2:]...)
 		}
 		span.SetAttributes(attribute.Bool("CacheHit", true))
 		span.RecordError(err)
@@ -234,7 +234,7 @@ func (ns *namesys) resolveOnceAsync(ctx context.Context, name string, options Re
 				// Attach rest of the path
 				p := res.Path
 				if p != nil && len(segments) > 2 {
-					p, err = path.Join(p, segments[2])
+					p, err = path.Join(p, segments[2:]...)
 				}
 
 				emitOnceResult(ctx, out, ResolveResult{Path: p, TTL: res.TTL, Err: res.Err})
@@ -293,4 +293,18 @@ func (ns *namesys) Publish(ctx context.Context, name ci.PrivKey, value path.Path
 	}
 	ns.cacheSet(cacheKey, value, ttl)
 	return nil
+}
+
+// Resolve is an utility function that takes a [NameSystem] and a [path.Path], and
+// returns the result of [NameSystem.Resolve] for the given path. If the given namesys
+// is nil, [ErrNoNamesys] is returned.
+func Resolve(ctx context.Context, ns NameSystem, p path.Path) (path.Path, time.Duration, error) {
+	ctx, span := startSpan(ctx, "Resolve", trace.WithAttributes(attribute.String("Path", p.String())))
+	defer span.End()
+
+	if ns == nil {
+		return nil, 0, ErrNoNamesys
+	}
+
+	return ns.Resolve(ctx, p.String())
 }

@@ -123,39 +123,6 @@ func (r *IPNSResolver) resolveOnceAsync(ctx context.Context, nameStr string, opt
 	return out
 }
 
-// ResolveIPNS is an utility that takes a [NameSystem] and a [path.Path] and resolves the IPNS Path.
-func ResolveIPNS(ctx context.Context, ns NameSystem, p path.Path) (path.Path, time.Duration, error) {
-	ctx, span := startSpan(ctx, "ResolveIPNS", trace.WithAttributes(attribute.String("Path", p.String())))
-	defer span.End()
-
-	if p.Namespace() != path.IPNSNamespace {
-		return p, 0, nil
-	}
-
-	if ns == nil {
-		return nil, 0, ErrNoNamesys
-	}
-
-	segments := p.Segments()
-
-	resolvablePath, err := path.NewPathFromSegments(segments[0], segments[1])
-	if err != nil {
-		return nil, 0, err
-	}
-
-	resolvedPath, ttl, err := ns.Resolve(ctx, resolvablePath.String())
-	if err != nil {
-		return nil, 0, err
-	}
-
-	p, err = path.Join(resolvedPath, segments[2:]...)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return p, ttl, nil
-}
-
 func calculateBestTTL(rec *ipns.Record) (time.Duration, error) {
 	ttl := DefaultResolverCacheTTL
 	if recordTTL, err := rec.TTL(); err == nil {

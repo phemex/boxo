@@ -72,6 +72,11 @@ func (m mockNamesys) Resolve(ctx context.Context, name string, opts ...namesys.R
 		// max uint
 		depth = ^uint(0)
 	}
+	p, err := path.NewPath(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	name = path.SegmentsToString(p.Segments()[:2]...)
 	for strings.HasPrefix(name, "/ipns/") {
 		if depth == 0 {
 			return value, 0, namesys.ErrResolveRecursion
@@ -86,7 +91,9 @@ func (m mockNamesys) Resolve(ctx context.Context, name string, opts ...namesys.R
 		ttl = v.ttl
 		name = value.String()
 	}
-	return value, ttl, nil
+
+	value, err = path.Join(value, p.Segments()[2:]...)
+	return value, ttl, err
 }
 
 func (m mockNamesys) ResolveAsync(ctx context.Context, name string, opts ...namesys.ResolveOption) <-chan namesys.ResolveResult {

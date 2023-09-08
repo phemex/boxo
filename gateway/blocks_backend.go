@@ -564,7 +564,7 @@ func (bb *BlocksBackend) getPathRoots(ctx context.Context, contentPath path.Immu
 func (bb *BlocksBackend) ResolveMutable(ctx context.Context, p path.Path) (path.ImmutablePath, time.Duration, error) {
 	switch p.Namespace() {
 	case path.IPNSNamespace:
-		p, ttl, err := namesys.ResolveIPNS(ctx, bb.namesys, p)
+		p, ttl, err := namesys.Resolve(ctx, bb.namesys, p)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -632,7 +632,7 @@ func (bb *BlocksBackend) ResolvePath(ctx context.Context, path path.ImmutablePat
 func (bb *BlocksBackend) resolvePath(ctx context.Context, p path.Path) (path.ImmutablePath, []string, error) {
 	var err error
 	if p.Namespace() == path.IPNSNamespace {
-		p, _, err = namesys.ResolveIPNS(ctx, bb.namesys, p)
+		p, _, err = namesys.Resolve(ctx, bb.namesys, p)
 		if err != nil {
 			return nil, nil, err
 		}

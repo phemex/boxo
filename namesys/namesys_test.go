@@ -92,7 +92,7 @@ func TestResolveIPNS(t *testing.T) {
 	inputPath, err := path.NewPath("/ipns/QmatmE9msSfkKxoffpHwNLNKgwZG8eT9Bud6YoPab52vpy/a/b/c")
 	require.NoError(t, err)
 
-	res, _, err := ResolveIPNS(context.Background(), ns, inputPath)
+	res, _, err := Resolve(context.Background(), ns, inputPath)
 	require.NoError(t, err)
 	require.Equal(t, "/ipfs/Qmcqtw8FfrVSBaRmbWwHxt3AuySBhJLcvmFYi3Lbc4xnwj/a/b/c", res.String())
 }
