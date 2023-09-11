@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/exp/maps"
 	"os"
 	"path"
 	"sync"
@@ -382,7 +383,8 @@ func (d *Directory) sync() error {
 		}
 	}
 
-	// TODO: Should we clean the cache here?
+	// clear entries cache for already updated.
+	maps.Clear(d.entriesCache)
 
 	return nil
 }
